@@ -1,0 +1,385 @@
+<meta charset="UTF-8">
+<html>
+<!--
+https://github.com/seikichi/tiff.js
+https://github.com/gfwilliams/ThinGallery
+Licensed as MPLv2
+-->
+ <head>
+  <title>viewer</title>
+  <meta name="viewport" content="minimal-ui, width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <script src="./js/jquery-2.0.3.min.js"></script>
+  <script src="./js/bootstrap.min.js"></script>
+  <script src="./js/tiff.min.js"></script>
+  <style>
+:root {
+  --thumb-width: 240px;
+  --thumb-height: 240px;
+}
+
+        body {
+         color: white;
+         background-color: black;
+        }
+ 	a > .thumb { color: #fff; }
+        .thumb {
+          position: relative;
+          display: inline-block;
+          width:var(--thumb-width); height:var(--thumb-height);
+          margin: 4px;
+          cursor: pointer;
+          overflow: hidden;
+        }
+       .caption {
+         text-align: center;
+         font-size: 80%;
+         font-family: Helvetica, Arial, Sans-Serif;
+         text-shadow: 1px 0 0 #000, 0 -1px 0 #000, 0 1px 0 #000, -1px 0 0 #000;
+         position: absolute;
+         width:var(--thumb-width);
+         bottom:0px;
+       }
+       .thumbicon {
+         position: absolute;
+         font-size:48px;
+         left:50%;
+         top:50%;
+         transform: translateX(-50%) translateY(-50%);
+       }
+       .thumbimage {
+          position:absolute;top:0px;left:0px;
+          width:var(--thumb-width); height:var(--thumb-height);
+          background-position: center;
+          background-repeat: no-repeat;
+          background-size: contain;
+       }
+       .fullscreen {
+         position: absolute;
+         width: 100%;
+         min-height: 100%;
+         left: 0;
+         top: 0;
+        }
+        #modal {
+          background-color: rgba(0,0,0,0.8);
+        }
+        #bigimage {
+         position: absolute;
+         width: 100%;
+         min-height: 100%;
+         left: 0;
+         top: 0;
+         background-position: center;
+         background-repeat: no-repeat;
+         background-size: contain;
+        }
+        #loadingimage {
+         position: absolute;
+         width: 100%;
+         min-height: 100%;
+         left: 0;
+         top: 0;
+         background-position: center;
+         background-repeat: no-repeat;
+         background-size: contain;
+        }
+        #left,#right,#maximise {
+          position:absolute;
+          font-size:96px;
+          font-weight: bold;
+        }
+        #left,#right {
+           top: 50%; transform: translateY(-50%);
+        }
+        #left {  left:10px; cursor:pointer; }
+        #right { right:10px; cursor:pointer; }
+        #maximise { right:10px;bottom:10px; cursor:pointer; }
+        #left,#right,#maximise {
+          text-shadow: 4px 0 0 #000, 0 -4px 0 #000, 0 4px 0 #000, -4px 0 0 #000, -3px -3px 0 #000, 3px -3px 0 #000, 3px 3px 0 #000, -3px -3px 0 #000;;
+        }
+   </style>
+ </head>
+<body>
+
+<div id="thumbs"></div>
+<script>
+
+var THUMB_SIZE = 240; // size when we have to load the full image and resize it
+var MAX_CONCURRENT_REQ = 2;
+var EXT_IMAGES = [".tif"];
+var requestsInProgress = 0;
+var requestsQueued = [];
+var baseURL = "";
+var imageURLs = [];
+var imageInfo = {};
+var showingImage; // currently loading/showing image
+var imageLoader, nextImageLoader, prevImageLoader;
+
+// Get a thumbnail from url data
+function getThumbFromFullImage(url, callback) {
+  var img = document.createElement('img');
+  img.onload = function () {
+    var oc = document.createElement('canvas'),
+        octx = oc.getContext('2d');
+    if (img.width > img.height) {
+      oc.width = THUMB_SIZE;
+      oc.height = THUMB_SIZE * img.height / img.width;
+    } else {
+      oc.width = THUMB_SIZE * img.width / img.height;
+      oc.height = THUMB_SIZE;
+    }
+    octx.drawImage(img, 0, 0, oc.width, oc.height);
+    callback(oc.toDataURL());
+  };
+  img.src = url;
+}
+
+// Given a image, download the header and try and find a thumbnail
+function getImageThumbnail(url, finishedCb, thumbCb) {
+  console.log("Loading "+url);
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', url);
+  xhr.responseType = "arraybuffer";
+  xhr.onload = function (e) {
+      var buffer = xhr.response;
+      var tiff = new Tiff({buffer: buffer});
+      var canvas = tiff.toCanvas();
+      var width = tiff.width()/2;
+      var height = tiff.height()/2;
+      var dataUrl = canvas.toDataURL();
+      thumbCb(dataUrl, true);
+      finishedCb();
+    }
+  xhr.send();
+}
+
+// Load image thumbnails using a queue (don't don them all at once)
+function getImageThumbnailThrottled(url, cb, passURL) {
+  if (requestsInProgress < MAX_CONCURRENT_REQ) {
+   requestsInProgress++;
+
+   function finishedCb() {
+     requestsInProgress--;
+     if (requestsQueued.length) {
+       var r = requestsQueued.shift();
+       getImageThumbnailThrottled(r.url, r.cb, r.passURL);
+     }
+   }
+
+   if (passURL) {
+     getThumbFromFullImage(url, function(url) {
+       cb(url);
+       finishedCb();
+     });
+   } else {
+     getImageThumbnail(url, finishedCb, cb);
+   }
+  } else {
+    //console.log("Delayed "+url);
+    requestsQueued.push({url:url,cb:cb,passURL:passURL});
+  }
+}
+
+// Make a displayable name from the URL
+function getNiceName(href) {
+  var niceName = href;
+  // remove trailing slashes
+  while (niceName[niceName.length-1]=="/")
+    niceName = niceName.substr(0,niceName.length-1);
+  // if there's a slash mid-way, delete what was before
+  if (niceName.lastIndexOf("/")>=0)
+    niceName = niceName.substr(niceName.lastIndexOf("/")+1);
+  return niceName;
+}
+
+// Add a thumbnail with a 'wait' indicator that fills in when ready
+function addDeferredThumb(thumbs, href) {
+  var niceName = getNiceName(href);
+
+  function thumbLoaded(url, rotate) {
+    imageInfo[href].thumb = url;
+    imageInfo[href].rotation = rotate;
+    im.innerHTML =
+      '<div class="thumbimage" style="background-image:url('+url+');transform:rotate('+rotate+'deg)"></div>'+
+      '<div class="caption">'+decodeURIComponent(niceName)+'</div>';
+  }
+
+  var im = document.createElement("DIV");
+  im.innerHTML = '<div class="caption">'+decodeURIComponent(niceName)+'</div><div class="thumbicon">&#8987;</div>';
+  im.className = "thumb";
+  im.onclick = function(e) {
+    e.preventDefault();
+    console.log("Clicked "+href);
+    if (e.ctrlKey) {
+      window.open(href, '_blank');
+    } else {
+      document.getElementById("modal").setAttribute("style","display:block;top:"+window.scrollY+"px");
+      loadImage(href);
+    }
+  };
+  im = thumbs.appendChild(im);
+  getImageThumbnailThrottled(href, function(url,rotate) {
+    if (url == href) {
+      // We use getImageThumbnailThrottled so we can make sure
+      // that full images get loaded AFTER all the thumbnails
+      getImageThumbnailThrottled(url, thumbLoaded, true);
+    } else {
+      thumbLoaded(url, rotate);
+    }
+  });
+}
+
+// Add a simple thumbnail where a click opens a new window
+function addBasicThumb(thumbs, href, iconText) {
+  var niceName = getNiceName(href);
+
+  var im = document.createElement("DIV");
+  im.innerHTML = '<div class="caption">'+decodeURIComponent(niceName)+'</div><div class="thumbicon">'+iconText+'</div>';
+  im.className = "thumb";
+  im.setAttribute("href", href);
+  im.onclick = function(e) {
+    e.preventDefault();
+    console.log("Clicked "+href);
+    window.open(href, '_blank');
+  };
+  im = thumbs.appendChild(im);
+}
+
+// Add thumbnail for a folder
+function addFolder(thumbs, href) {
+  var niceName = getNiceName(href);
+  if (href.length < baseURL.length) niceName = "[BACK]";
+
+  var a = document.createElement("A");
+  a.href = window.location.pathname+"?"+href;
+  a.innerHTML = '<div class="thumb folder"><div class="caption">'+decodeURIComponent(niceName)+'</div><div class="thumbicon">&#128193;</div></div>';
+  thumbs.appendChild(a);
+}
+
+// Scan the index page and add thumbnails for everything
+function processIndexPage() {
+  //console.log(this.responseXML.title);
+  var thumbs = document.getElementById("thumbs");
+  var elements = this.responseXML.getElementsByTagName("a");
+  var handled = [];
+  for (var i=0;i<elements.length;i++) {
+    var href = elements[i].href;
+    var text = elements[i].innerText;
+    var parentText = elements[i].parentElement.innerText;
+    var re = new RegExp(text + '\/', "g");
+
+    if (handled.indexOf(href)>=0) continue;
+    if ((href[href.length-1]=="/" || parentText.match(re) )&& href!==baseURL) {
+      handled.push(href);
+      addFolder(thumbs, href);
+    }
+  }
+  for (var i=0;i<elements.length;i++) {
+    var href = elements[i].href;
+    var hrefl = href.toLowerCase();
+    var ext = hrefl.match(/\.[^\.]*$/);
+    if (!ext) continue;
+    ext=ext[0];
+    if (EXT_IMAGES.indexOf(ext)>=0) {
+      if (handled.indexOf(href)>=0) continue;
+      handled.push(href);
+      imageURLs.push(href);
+      imageInfo[href] = { thumb : "" };
+      addDeferredThumb(thumbs, href);
+    } else console.log("Unknown file type "+href+", ignoring.");
+
+  }
+  document.getElementById("left").setAttribute("style","visibility:inherit");
+  document.getElementById("right").setAttribute("style","visibility:inherit");
+  document.getElementById("maximise").setAttribute("style","visibility:inherit");
+  document.getElementById("modal").setAttribute("style","visibility:hidden");
+}
+
+// Load the index page from the web server and display thumbnails
+function loadAllImages(url) {
+  console.log("Loadings "+url);
+  var xhr = new XMLHttpRequest();
+  xhr.onload = processIndexPage;
+  baseURL = url;
+  xhr.open("GET", baseURL);
+  xhr.responseType = "document";
+  xhr.send();
+}
+
+// Load a full-size image and also try and load next/prev for faster navigation
+function loadImage(url) {
+  var transform = imageInfo[url].rotation ? ';transform:rotate('+imageInfo[url].rotation+'deg)' : "";
+  document.getElementById("bigimage").setAttribute("style","background-image:url("+imageInfo[url].thumb+")"+transform);
+  imageLoader.onload = function() {
+    console.log("Full image loaded. Loading next and prev.");
+    var i = imageURLs.indexOf(showingImage);
+    if (i>=0) {
+      if (i>0) prevImageLoader.src = imageURLs[i-1]+"?rand";
+      if (i<imageURLs.length-1) nextImageLoader.src = imageURLs[i+1]+"?rand";
+    }
+  };
+  imageLoader.src = url+"?rand";
+  document.getElementById("loadingimage").setAttribute("style","background-image:url("+url.replace(/\(/g, "\\(").replace(/\)/g, "\\)")+"?rand)"+transform);
+  showingImage = url;
+}
+
+function onModalClicked(e) {
+  e.preventDefault();
+  if (e.target.id=="left" || e.target.id=="right" || e.target.id=="maximise") return;
+  document.getElementById("modal").setAttribute("style","visibility:hidden");
+  document.getElementById("bigimage").setAttribute("style","");
+  document.getElementById("loadingimage").setAttribute("style","");
+  showingImage = null;
+}
+
+function onChangeModal(e, dir) {
+  e.preventDefault();
+  var i = imageURLs.indexOf(showingImage);
+  if (i<0) i=0;
+  i += dir;
+  if (i<0) i+= imageURLs.length;
+  if (i>=imageURLs.length) i-= imageURLs.length;
+  loadImage(imageURLs[i]);
+}
+
+function onMaximiseClicked(e) {
+  e.preventDefault();
+  if (!showingImage) return;
+  window.open(showingImage, '_blank').focus();
+}
+
+window.onscroll = onModalClicked;
+window.onload = function() {
+  imageLoader = document.createElement("IMG");
+  nextImageLoader = document.createElement("IMG");
+  prevImageLoader = document.createElement("IMG");
+
+  document.getElementById("modal").onclick = onModalClicked;
+  document.getElementById("left").onclick = function(e) { onChangeModal(e,-1); };
+  document.getElementById("right").onclick = function(e) { onChangeModal(e,+1); };
+  document.getElementById("maximise").onclick = onMaximiseClicked;
+  // document.addEventListener("keydown", function (e) {
+  //   if (e.keyCode==37) onChangeModal(e,-1);
+  //   if (e.keyCode==39) onChangeModal(e,1);
+  // });
+
+  if (window.location.search.length>1)
+    loadAllImages(window.location.search.substr(1));
+  else
+    loadAllImages(".");
+};
+
+</script>
+
+<div id="modal" class="fullscreen">
+  <div id="bigimage" style="visibility:hidden"></div>
+  <div id="loadingimage" style="visibility:hidden"></div>
+  <div id="left" style="visibility:hidden">&#9664;</div>
+  <div id="right" style="visibility:hidden">&#9654;</div>
+  <div id="maximise" style="visibility:hidden">&#x2798;</div>
+</div>
+
+</div>
+</body>
+
+</html>
