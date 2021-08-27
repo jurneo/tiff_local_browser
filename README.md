@@ -1,4 +1,4 @@
-Tiff Local Browser
+PDF/Tiff Local Browser
 ==================
 
 Modified from: https://github.com/gfwilliams/ThinGallery
